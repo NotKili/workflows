@@ -1,0 +1,103 @@
+name: Build, Release & Publish JAR
+
+on:
+  push:
+    branches:
+      - gitActions2
+
+jobs:
+  build-and-publish:
+    if: contains(github.event.head_commit.message, 'version(')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Determine Module
+        id: determine-module
+        run: |
+          echo "Parsing commit message..."
+          COMMIT_MESSAGE="${{ github.event.head_commit.message }}"
+          if [[ "$COMMIT_MESSAGE" =~ version\(([a-zA-Z0-9_-]+)\):\ ([0-9]+\.[0-9]+\.[0-9]+(-([a-zA-Z]+))?) ]]; then
+            MODULE="${BASH_REMATCH[1]}"
+            VERSION="${BASH_REMATCH[2]}"
+            echo "Module to build: $MODULE"
+            echo "Version: $VERSION"
+            echo "::set-output name=module::$MODULE"
+            echo "::set-output name=version::$VERSION"
+            echo "module=$MODULE" >> $GITHUB_ENV
+            echo "version=$VERSION" >> $GITHUB_ENV
+          else
+            echo "Commit message does not match the expected pattern."
+            exit 1
+          fi
+
+      - name: Validate Module
+        run: |
+          MODULE="${{ steps.determine-module.outputs.module }}"
+          ALLOWED_MODULES=("animation" "core" "discord" "pixelmon" "placeholder" "worldedit")
+          if [[ ! " ${ALLOWED_MODULES[@]} " =~ " ${MODULE} " ]]; then
+            echo "Module $MODULE is not allowed. Exiting."
+            exit 1
+          else
+            echo "Module $MODULE is allowed. Continuing."
+          fi
+
+      - name: Checkout code
+        id: checkout
+        uses: actions/checkout@v3
+
+      - name: Set up JDK 11
+        id: setup-jdk
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Grant execute permission for gradlew
+        id: grant-permission
+        run: chmod +x ./gradlew
+
+      - name: Build JAR
+        id: build-jar
+        run: ./gradlew :${{ env.module }}:clean :${{ env.module }}:build
+
+      - name: Delete Existing Release & Tagh
+        id: delete-release_tag
+        run: |
+          echo "Deleting existing release..."
+          version=${{ steps.determine-module.outputs.version }}
+          release_tags=$(gh release list --json tagName | jq -r '.[] | .tagName')
+          if echo "$release_tags" | grep -q "^$version$"; then
+            echo "Deleting release with version $version ..."
+            gh release delete "$version" -y
+            echo "Deleting existing tag..."
+            git tag -d ${{ env.version }} || true
+            git push --delete origin ${{ env.version }} || true
+          else
+            echo "No release found with version $VERSION"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+
+      - name: Release JAR
+        id: release-jar
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ env.version }}
+          release_name: ${{ env.module }}-${{ env.version }}
+          body: "Release of ${{ env.module }} version ${{ env.version }}"
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload JAR to Release
+        id: upload-jar
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.release-jar.outputs.upload_url }}
+          asset_path: ${{ env.module }}/build/libs/basementlib_${{ env.module }}-${{ env.version }}.jar
+          asset_name: basementlib_${{ env.module }}-${{ env.version }}.jar
+          asset_content_type: application/java-archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
